@@ -1,6 +1,8 @@
 use anyhow::Result;
+use chrono::Utc;
 use flight_tracker::Tracker;
-use std::fmt;
+use postgres::{Client, NoTls};
+use std::{fmt, time::SystemTime};
 use std::io;
 use std::io::BufRead;
 use std::io::BufReader;
@@ -39,6 +41,7 @@ enum Command {
         #[structopt(help = "port", default_value = "30002")]
         port: u16,
     },
+    Postgres,
 }
 
 fn main() -> Result<()> {
@@ -49,6 +52,7 @@ fn main() -> Result<()> {
     let reader = match args.cmd {
         Command::Stdin => read_from_stdin(tracker),
         Command::Tcp { host, port } => read_from_network(host, port, tracker),
+        Command::Postgres => read_from_postgres(tracker),
     };
 
     reader.join().unwrap()?;
@@ -65,6 +69,36 @@ fn read_from_stdin(tracker: Arc<Mutex<Tracker>>) -> JoinHandle<Result<()>> {
             let mut tracker = tracker.lock().unwrap();
             let _ = tracker.update_with_avr(&input);
             input.clear();
+        }
+    })
+}
+
+struct Ping {
+    timestamp: chrono::DateTime<Utc>,
+    data: Vec<u8>,
+}
+
+fn read_from_postgres(tracker: Arc<Mutex<Tracker>>) -> JoinHandle<Result<()>> {
+    thread::spawn(move || {
+        let mut client = Client::connect(
+            "host=storage.local port=54322 user=orbital password=orbital",
+            NoTls,
+        )?;
+        let mut trans = client.transaction().unwrap();
+        let portal = trans.bind(
+            "SELECT timestamp, data FROM pings order by timestamp asc",
+            &[],
+        )?;
+        loop {
+            let result = trans.query_portal(&portal, 10000)?;
+            for row in result {
+                let ping = Ping {
+                    timestamp: row.get(0),
+                    data: row.get(1),
+                };
+                let mut tracker = tracker.lock().unwrap();
+                let _ = tracker.update_with_binary(&ping.data);
+            }
         }
     })
 }
