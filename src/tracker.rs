@@ -1,6 +1,6 @@
 use adsb::*;
+use chrono::{Utc, Duration};
 use std::collections::HashMap;
-use std::time::{Duration, SystemTime};
 use MessageKind::*;
 
 /// A tracked aircraft
@@ -25,13 +25,13 @@ pub struct Aircraft {
     /// Source for vertical rate information
     pub vertical_rate_source: Option<VerticalRateSource>,
     /// Timestamp for last received message
-    pub last_seen: SystemTime,
+    pub last_seen: chrono::DateTime<Utc>,
     last_cpr_even: Option<CPRFrame>,
     last_cpr_odd: Option<CPRFrame>,
 }
 
 impl Aircraft {
-    fn new(icao_address: ICAOAddress) -> Self {
+    fn new(icao_address: ICAOAddress, time: chrono::DateTime<Utc>) -> Self {
         Aircraft {
             icao_address,
             callsign: None,
@@ -42,7 +42,7 @@ impl Aircraft {
             latitude: None,
             longitude: None,
             vertical_rate_source: None,
-            last_seen: SystemTime::now(),
+            last_seen: time,
             last_cpr_even: None,
             last_cpr_odd: None,
         }
@@ -79,6 +79,10 @@ impl Aircraft {
 #[derive(Default)]
 pub struct Tracker {
     map: HashMap<ICAOAddress, Aircraft>,
+    num_messages: u64,
+    num_unknown_messages: u64,
+    unknown_message_counts: HashMap<u8, u64>,
+    known_message_counts: HashMap<u8, u64>,
 }
 
 impl Tracker {
@@ -88,36 +92,50 @@ impl Tracker {
     }
 
     /// Update the tracker with a received ADSB message in AVR format
-    pub fn update_with_avr(&mut self, frame: &str) -> Result<(), adsb::ParserError> {
+    pub fn update_with_avr(&mut self, frame: &str, time: chrono::DateTime<Utc>) -> Result<(), adsb::ParserError> {
         let (message, _) = adsb::parse_avr(frame)?;
-        self.update_with_message(message);
+        self.update_with_message(message, time);
         Ok(())
     }
 
     /// Update the tracker with a received ADSB message in binary format
-    pub fn update_with_binary(&mut self, frame: &[u8]) -> Result<(), adsb::ParserError> {
+    pub fn update_with_binary(&mut self, frame: &[u8], time: chrono::DateTime<Utc>) -> Result<(), adsb::ParserError> {
         let (message, _) = adsb::parse_binary(frame)?;
-        self.update_with_message(message);
+        self.update_with_message(message, time);
         Ok(())
     }
 
-    fn update_with_message(&mut self, message: Message) {
+    fn update_unknown_message_statistics(&mut self, message: Message) {
+        let df = message.downlink_format;
+        *self.unknown_message_counts.entry(df).or_insert(0) += 1;
+        self.num_unknown_messages += 1;
+    }
+
+    fn update_with_message(&mut self, message: Message, time: chrono::DateTime<Utc>) {
         use ADSBMessageKind::*;
 
+        self.num_messages += 1;
         let (icao_address, kind) = match message {
+
             Message {
                 kind: ADSBMessage {
                     icao_address, kind, ..
                 },
                 ..
-            } => (icao_address, kind),
-            _ => return,
+            } => {
+                *self.known_message_counts.entry(message.downlink_format).or_insert(0) += 1;
+                (icao_address, kind)
+            },
+            _ => {
+                self.update_unknown_message_statistics(message);
+                return
+            },
         };
 
         let aircraft = self
             .map
             .entry(icao_address)
-            .or_insert_with(|| Aircraft::new(icao_address));
+            .or_insert_with(|| Aircraft::new(icao_address, time));
 
         match kind {
             AircraftIdentification { callsign, .. } => {
@@ -143,22 +161,36 @@ impl Tracker {
             }
         }
 
-        aircraft.last_seen = SystemTime::now();
+        aircraft.last_seen = time;
     }
 
     /// Get a list of aircraft last seen in the given interval
     pub fn get_current_aircraft(&self, interval: &Duration) -> Vec<&Aircraft> {
+        let now = Utc::now();
         self.map
             .values()
-            .filter(|a| match a.last_seen.elapsed() {
-                Ok(elapsed) => elapsed < *interval,
-                Err(_) => false,
-            })
+            .filter(|a | now.signed_duration_since(a.last_seen) < *interval)
             .collect()
     }
 
     // Get a list of all tracked aircraft
     pub fn get_all_aircraft(&self) -> Vec<&Aircraft> {
         self.map.values().collect()
+    }
+
+    pub fn get_num_messages(&self) -> u64 {
+        self.num_messages
+    }
+
+    pub fn get_num_unknown_messages(&self) -> u64 {
+        self.num_unknown_messages
+    }
+
+    pub fn get_unknown_message_statistics(&self) -> &HashMap<u8, u64> {
+        return &self.unknown_message_counts;
+    }
+
+    pub fn get_known_message_statistics(&self) -> &HashMap<u8, u64> {
+        return &self.known_message_counts;
     }
 }
