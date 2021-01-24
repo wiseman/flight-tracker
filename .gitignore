@@ -1,3 +1,4 @@
 /server/*.sh
 /target
 **/*.rs.bk
+.venv

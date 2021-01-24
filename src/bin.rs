@@ -11,6 +11,11 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::{cmp::min, fmt};
 use structopt::StructOpt;
+use termion::raw::IntoRawMode;
+use tui::{backend::TermionBackend, Terminal};
+use ui::App;
+
+mod ui;
 
 const REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 const NA: &str = "";
@@ -62,15 +67,27 @@ fn main() -> Result<()> {
     let tracker = Arc::new(Mutex::new(Tracker::new()));
     let expire = Duration::seconds(args.expire);
     let show_stats = args.stats;
-    let writer = write_output(tracker.clone(), expire, show_stats);
+    let mut app = App::new("Untitled Flight Tracker", tracker.clone());
     let reader = match args.cmd {
         Command::Stdin => read_from_stdin(tracker),
         Command::Tcp { host, port } => read_from_network(host, port, tracker),
         Command::Postgres { query } => read_from_postgres(tracker, query),
     };
+    // let writer = write_output(app, expire, show_stats);
+
+    let stdout = io::stdout()
+        .into_raw_mode()
+        .expect("Unable to switch stdout to raw mode");
+    let backend = TermionBackend::new(stdout);
+    let mut terminal = Terminal::new(backend).expect("Unable to initialize terminal");
+    loop {
+        terminal.draw(|f| ui::draw(f, &mut app));
+        if app.should_quit {
+            break;
+        }
+    }
 
     reader.join().unwrap()?;
-    writer.join().unwrap()?;
 
     Ok(())
 }
@@ -129,22 +146,6 @@ fn read_from_network(
             let mut tracker = tracker.lock().unwrap();
             let _ = tracker.update_with_avr(&input, Utc::now());
             input.clear();
-        }
-    })
-}
-
-fn write_output(
-    tracker: Arc<Mutex<Tracker>>,
-    expire: Duration,
-    show_stats: bool,
-) -> JoinHandle<Result<()>> {
-    thread::spawn(move || loop {
-        thread::sleep(REFRESH_INTERVAL);
-        let tracker = tracker.lock().unwrap();
-        if show_stats {
-            print_message_stats(&tracker);
-        } else {
-            print_ascii_table(&tracker, &expire);
         }
     })
 }
