@@ -14,6 +14,9 @@ use structopt::StructOpt;
 use termion::raw::IntoRawMode;
 use tui::{backend::TermionBackend, Terminal};
 use ui::App;
+use std::io::{Write, stdout, stdin};
+use termion::event::Key;
+use termion::input::TermRead;
 
 mod ui;
 
@@ -75,10 +78,11 @@ fn main() -> Result<()> {
     };
     // let writer = write_output(app, expire, show_stats);
 
-    let stdout = io::stdout()
+    let mut stdout = io::stdout()
         .into_raw_mode()
         .expect("Unable to switch stdout to raw mode");
-    let backend = TermionBackend::new(stdout);
+    write!(stdout, "{}", termion::clear::All).expect("Unable to clear terminal");
+        let backend = TermionBackend::new(stdout);
     let mut terminal = Terminal::new(backend).expect("Unable to initialize terminal");
 
     let orig_hook = panic::take_hook();
@@ -88,17 +92,24 @@ fn main() -> Result<()> {
         process::exit(1);
     }));
 
-
+    let stdin = termion::async_stdin();
+    let mut keys = stdin.keys();
     loop {
         terminal.draw(|f| ui::draw(f, &mut app));
         if app.should_quit {
             break;
         }
         thread::sleep(REFRESH_INTERVAL);
+        let key = keys.next();
+        if let Some(event) = key {
+            match event? {
+                Key::Char('q') => {
+                    app.should_quit = true;
+                },
+                _ => {}
+            }
+        }
     }
-
-    reader.join().unwrap()?;
-
     Ok(())
 }
 
@@ -152,7 +163,7 @@ fn read_from_network(
         let mut reader = BufReader::new(stream);
         let mut input = String::new();
         loop {
-            let _ = reader.read_line(&mut input)?;
+            let _ = std::io::BufRead::read_line(&mut reader, &mut input)?;
             let mut tracker = tracker.lock().unwrap();
             let _ = tracker.update_with_avr(&input, Utc::now());
             input.clear();
