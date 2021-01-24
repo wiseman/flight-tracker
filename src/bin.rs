@@ -3,7 +3,7 @@ use chrono::{Duration, Utc};
 use flight_tracker::Tracker;
 use itertools::Itertools;
 use postgres::{Client, NoTls};
-use std::io;
+use std::{io, panic, process};
 use std::io::BufRead;
 use std::io::BufReader;
 use std::net::TcpStream;
@@ -80,11 +80,21 @@ fn main() -> Result<()> {
         .expect("Unable to switch stdout to raw mode");
     let backend = TermionBackend::new(stdout);
     let mut terminal = Terminal::new(backend).expect("Unable to initialize terminal");
+
+    let orig_hook = panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        orig_hook(panic_info);
+        println!("Aborting");
+        process::exit(1);
+    }));
+
+
     loop {
         terminal.draw(|f| ui::draw(f, &mut app));
         if app.should_quit {
             break;
         }
+        thread::sleep(REFRESH_INTERVAL);
     }
 
     reader.join().unwrap()?;
@@ -150,12 +160,6 @@ fn read_from_network(
     })
 }
 
-fn fmt_value<T: fmt::Display>(value: Option<T>, precision: usize) -> String {
-    value
-        .map(|v| format!("{:.1$}", v, precision))
-        .unwrap_or_else(|| NA.to_string())
-}
-
 fn print_ascii_table(tracker: &Tracker, expire: &Duration) {
     // Clear screen
     print!("\x1B[2J\x1B[H");
@@ -176,21 +180,6 @@ fn print_ascii_table(tracker: &Tracker, expire: &Duration) {
             "{:>6} {:>10} {:>8} {:>6} {:>5} {:>8} {:>17} {:>5}",
             "icao", "call", "alt", "hdg", "gs", "vr", "lat/lon", "last"
         );
-        println!("{}", "-".repeat(72));
-        for aircraft in aircraft_list[0..min(aircraft_list.len(), 30)].to_vec() {
-            println!(
-                "{:>6} {:>10} {:>8} {:>6} {:>5} {:>8} {:>8},{:>8} {:>5}",
-                aircraft.icao_address,
-                aircraft.callsign.clone().unwrap_or_else(|| NA.to_string()),
-                fmt_value(aircraft.altitude, 0),
-                fmt_value(aircraft.heading, 0),
-                fmt_value(aircraft.ground_speed, 0),
-                fmt_value(aircraft.vertical_rate, 0),
-                fmt_value(aircraft.latitude, 4),
-                fmt_value(aircraft.longitude, 4),
-                now.signed_duration_since(aircraft.last_seen).num_seconds()
-            );
-        }
     }
 }
 

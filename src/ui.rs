@@ -1,16 +1,25 @@
 use chrono::Duration;
 use flight_tracker::Tracker;
-use std::sync::{Arc, Mutex};
+use std::{
+    fmt,
+    sync::{Arc, Mutex},
+};
 use tui::{
     backend::Backend,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Span, Spans},
-    widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table, TableState, Tabs, Wrap},
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState},
     Frame,
 };
 
 const NA: &str = "";
+
+pub fn fmt_value<T: fmt::Display>(value: Option<T>, precision: usize) -> String {
+    value
+        .map(|v| format!("{:>.1$}", v, precision))
+        .unwrap_or_else(|| NA.to_string())
+}
 
 pub struct TabsState<'a> {
     pub titles: Vec<&'a str>,
@@ -113,18 +122,48 @@ impl<'a> StatefulTable<'a> {
     }
 }
 
-pub fn draw<B: Backend>(f: &mut Frame<B>, app: &mut App) {
+pub fn draw<B: Backend>(f: &mut Frame<B>, app: &App) {
     let rects = Layout::default()
-        .constraints([Constraint::Percentage(100)].as_ref())
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(4), Constraint::Min(0)].as_ref())
         .margin(0)
         .split(f.size());
+    draw_message_stats(f, app, rects[0]);
+    draw_aircraft_table(f, app, rects[1]);
+}
+
+fn draw_message_stats<B: Backend>(f: &mut Frame<B>, app: &App, rect: Rect) {
+    let tracker = app.tracker.lock().unwrap();
+    if let Some(now) = tracker.get_most_recent_message_time() {
+        let text = vec![
+            Spans::from(vec![Span::raw(format!("{}", now))]),
+            Spans::from(vec![Span::raw(format!(
+                "# msgs:       {:>10}",
+                tracker.get_num_messages()
+            ))]),
+            Spans::from(vec![Span::raw(format!(
+                "# unk:        {:>10}",
+                tracker.get_num_unknown_messages()
+            ))]),
+            Spans::from(vec![Span::raw(format!(
+                "# msgs proc/s {:>12.1}",
+                tracker.get_messages_per_second_real_time().unwrap_or(0.0)
+            ))]),
+        ];
+        f.render_widget(Paragraph::new(text), rect);
+    }
+}
+
+fn draw_aircraft_table<B: Backend>(f: &mut Frame<B>, app: &App, rect: Rect) {
+    let tracker = app.tracker.lock().unwrap();
     let selected_style = Style::default().add_modifier(Modifier::REVERSED);
     let normal_style = Style::default();
-    let header_cells = ["icao", "call", "alt"]
-        .iter()
-        .map(|h| Cell::from(*h).style(Style::default()));
+    let header_cells = [
+        "ICAO", "CALL", "SQK", "ALT", "HDG", "GS", "VR", "POS", "LAST",
+    ]
+    .iter()
+    .map(|h| Cell::from(*h).style(Style::default()));
     let header = Row::new(header_cells).style(normal_style);
-    let tracker = app.tracker.lock().unwrap();
     let rows = match tracker.get_most_recent_message_time() {
         Some(now) => {
             tracker
@@ -133,20 +172,24 @@ pub fn draw<B: Backend>(f: &mut Frame<B>, app: &mut App) {
                 .map(|a| {
                     let aircraft = *a;
                     let fields = vec![
-                        format!("{:?}", aircraft.icao_address),
-                        "123".to_string(),
-                        // *aircraft.callsign.unwrap_or("".to_string()),
-                        format!("{:?}", aircraft.altitude),
+                        format!("{}", aircraft.icao_address),
+                        aircraft.callsign.clone().unwrap_or_else(|| "".to_string()),
+                        "".to_string(),
+                        fmt_value(aircraft.altitude, 0),
+                        fmt_value(aircraft.heading, 0),
+                        fmt_value(aircraft.ground_speed, 0),
+                        fmt_value(aircraft.vertical_rate, 0),
+                        format!(
+                            "{:>8},{:>8}",
+                            fmt_value(aircraft.latitude, 4),
+                            fmt_value(aircraft.longitude, 4)
+                        ),
+                        fmt_value(
+                            Some(now.signed_duration_since(aircraft.last_seen).num_seconds()),
+                            0,
+                        ),
                     ];
                     Row::new(fields.iter().map(|item| Cell::from(item.clone())))
-                    // let cells = vec![
-                    //     format!("{:?}", aircraft.icao_address),
-                    //     aircraft.callsign.unwrap_or("".to_string()),
-                    //     format!("{:?}", aircraft.altitude),
-                    // ]
-                    // .iter()
-                    // .map(|item| Cell::from(*item));
-                    // Row::new(cells)
                 })
                 .collect::<Vec<Row>>()
         }
@@ -160,28 +203,19 @@ pub fn draw<B: Backend>(f: &mut Frame<B>, app: &mut App) {
     };
     let t = Table::new(rows)
         .header(header)
-        .block(Block::default().borders(Borders::ALL).title("Table"))
+        .block(Block::default().borders(Borders::ALL).title("Aircraft"))
         .highlight_style(selected_style)
         .highlight_symbol(">> ")
         .widths(&[
-            Constraint::Percentage(50),
-            Constraint::Length(30),
-            Constraint::Max(10),
+            Constraint::Length(6),
+            Constraint::Length(10),
+            Constraint::Length(8),
+            Constraint::Length(6),
+            Constraint::Length(5),
+            Constraint::Length(5),
+            Constraint::Length(8),
+            Constraint::Length(17),
+            Constraint::Length(5),
         ]);
-    f.render_widget(t, rects[0]);
-}
-
-fn draw_aircraft_table<B>(f: &mut Frame<B>, area: Rect)
-where
-    B: Backend,
-{
-    let text = vec![Spans::from("Hello!")];
-    let block = Block::default().borders(Borders::ALL).title(Span::styled(
-        "Footer",
-        Style::default()
-            .fg(Color::Magenta)
-            .add_modifier(Modifier::BOLD),
-    ));
-    let paragraph = Paragraph::new(text).block(block).wrap(Wrap { trim: true });
-    f.render_widget(paragraph, area);
+    f.render_widget(t, rect);
 }
