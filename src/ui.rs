@@ -1,5 +1,6 @@
 use chrono::Duration;
 use flight_tracker::Tracker;
+use itertools::Itertools;
 use std::{
     fmt,
     sync::{Arc, Mutex},
@@ -37,7 +38,7 @@ impl<'a> App<'a> {
     }
 }
 
-pub fn draw<B: Backend>(f: &mut Frame<B>, app: &App) {
+pub fn draw_screen_1<B: Backend>(f: &mut Frame<B>, app: &App) {
     let rects = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(4), Constraint::Min(0)].as_ref())
@@ -128,4 +129,69 @@ fn draw_aircraft_table<B: Backend>(f: &mut Frame<B>, app: &App, rect: Rect) {
             Constraint::Length(5),
         ]);
     f.render_widget(t, rect);
+}
+
+pub fn draw_screen_2<B: Backend>(f: &mut Frame<B>, app: &App) {
+    let rects = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(4), Constraint::Min(0)].as_ref())
+        .margin(0)
+        .split(f.size());
+    draw_message_stats(f, app, rects[0]);
+    draw_message_distribution(f, app, rects[1])
+}
+
+fn draw_message_distribution<B: Backend>(f: &mut Frame<B>, app: &App, rect: Rect) {
+    let tracker = app.tracker.lock().unwrap();
+    let known_message_counts = tracker.get_known_message_statistics();
+    let mut known_dist = known_message_counts
+        .keys()
+        .sorted()
+        .map(|df| {
+            Spans::from(vec![Span::raw(format!(
+                "{:>4} {:>9}\n",
+                df, known_message_counts[df]
+            ))])
+        })
+        .collect::<Vec<Spans>>();
+    let unknown_message_counts = tracker.get_unknown_message_statistics();
+    let mut unknown_dist = unknown_message_counts
+        .keys()
+        .sorted()
+        .map(|df| {
+            Spans::from(vec![Span::raw(format!(
+                "{:>4} {:>9}\n",
+                df, unknown_message_counts[df]
+            ))])
+        })
+        .collect::<Vec<Spans>>();
+    let unknown_data = tracker.get_unknown_message_data();
+    let mut unknown_specimens = unknown_data
+        .keys()
+        .sorted()
+        .map(|df| {
+            Spans::from(vec![Span::raw(format!(
+                "{:>4} {}\n",
+                df,
+                unknown_data[df]
+                    .iter()
+                    .map(|b| format!("{:02X}", b))
+                    .join("")
+            ))])
+        })
+        .collect::<Vec<Spans>>();
+    let mut text: Vec<Spans> = vec![];
+    text.push(Spans::from(vec![Span::raw(
+        "\n\nKnown message counts by DF:",
+    )]));
+    text.append(&mut known_dist);
+    text.push(Spans::from(vec![Span::raw(
+        "\n\nUnknown message counts by DF:",
+    )]));
+    text.append(&mut unknown_dist);
+    text.push(Spans::from(vec![Span::raw(
+        "\n\nUnknown message specimens by DF:",
+    )]));
+    text.append(&mut unknown_specimens);
+    f.render_widget(Paragraph::new(text), rect);
 }

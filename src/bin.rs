@@ -17,7 +17,7 @@ use ui::App;
 
 mod ui;
 
-const REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+const REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
 
 #[derive(StructOpt)]
 #[structopt(about = "Track aircraft via ADSB")]
@@ -54,6 +54,11 @@ enum Command {
     },
 }
 
+enum InteractiveScreen {
+    Screen1,
+    Screen2,
+}
+
 fn main() -> Result<()> {
     let args = Cli::from_args();
     let tracker = Arc::new(Mutex::new(Tracker::new()));
@@ -82,9 +87,17 @@ fn main() -> Result<()> {
 
     let stdin = termion::async_stdin();
     let mut keys = stdin.keys();
+    let mut screen = InteractiveScreen::Screen1;
     loop {
         terminal
-            .draw(|f| ui::draw(f, &app))
+            .draw(|f| match screen {
+                InteractiveScreen::Screen1 => {
+                    ui::draw_screen_1(f, &app);
+                }
+                InteractiveScreen::Screen2 => {
+                    ui::draw_screen_2(f, &app);
+                }
+            })
             .expect("Unable to render");
         if app.should_quit {
             break;
@@ -92,8 +105,13 @@ fn main() -> Result<()> {
         thread::sleep(REFRESH_INTERVAL);
         let key = keys.next();
         if let Some(event) = key {
-            if let Key::Char('q') = event? {
-                app.should_quit = true;
+            match event? {
+                Key::Char('q') => {
+                    app.should_quit = true;
+                }
+                Key::Char('1') => screen = InteractiveScreen::Screen1,
+                Key::Char('2') => screen = InteractiveScreen::Screen2,
+                _ => {}
             }
         }
     }
