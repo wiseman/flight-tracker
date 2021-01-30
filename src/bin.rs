@@ -149,8 +149,8 @@ fn read_from_postgres(tracker: Arc<Mutex<Tracker>>, query: String) -> JoinHandle
             let mut tracker = tracker.lock().unwrap();
             for row in result {
                 let ping = Ping {
-                    timestamp: row.get(0),
-                    data: row.get(1),
+                    timestamp: row.get("timestamp"),
+                    data: row.get("data"),
                 };
                 let _ = tracker.update_with_binary(&ping.data, ping.timestamp);
             }

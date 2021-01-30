@@ -10,6 +10,8 @@ pub struct Aircraft {
     pub icao_address: ICAOAddress,
     /// Current aircraft callsign
     pub callsign: Option<String>,
+    /// Squawk code
+    pub squawk: Option<Squawk>,
     /// Current altitude (feet)
     pub altitude: Option<u16>,
     /// Current heading (degrees)
@@ -35,6 +37,7 @@ impl Aircraft {
         Aircraft {
             icao_address,
             callsign: None,
+            squawk: None,
             altitude: None,
             heading: None,
             ground_speed: None,
@@ -86,7 +89,7 @@ pub struct Tracker {
     known_message_counts: HashMap<u8, u64>,
     most_recent_message_time: Option<chrono::DateTime<Utc>>,
     first_message_real_time: Option<chrono::DateTime<Utc>>,
-    most_recent_message_real_time: Option<chrono::DateTime<Utc>>
+    most_recent_message_real_time: Option<chrono::DateTime<Utc>>,
 }
 
 pub fn parse_avr(frame: &str) -> Result<Vec<u8>, std::num::ParseIntError> {
@@ -99,7 +102,6 @@ pub fn parse_avr(frame: &str) -> Result<Vec<u8>, std::num::ParseIntError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    const CAPABILITY: u8 = 5;
 
     #[test]
     fn test_parse_avr() {
@@ -133,7 +135,7 @@ impl Tracker {
             Err(err) => {
                 println!("{:?}", err);
                 panic!("Done");
-            }        
+            }
         }
     }
 
@@ -148,7 +150,7 @@ impl Tracker {
         Ok(())
     }
 
-    fn update_unknown_message_statistics(&mut self, message: Message, data: &[u8]) {
+    fn update_unknown_message_statistics(&mut self, message: &Message, data: &[u8]) {
         let df = message.downlink_format;
         *self.unknown_message_counts.entry(df).or_insert(0) += 1;
         self.unknown_message_data.insert(df, Vec::from(data));
@@ -156,25 +158,30 @@ impl Tracker {
     }
 
     fn update_with_message(&mut self, message: Message, data: &[u8], time: chrono::DateTime<Utc>) {
-        use ADSBMessageKind::*;
         // println!("{:>10} {:?} {:02X?}", self.get_num_messages(), time, data);
         let now = Utc::now();
         self.num_messages += 1;
-        let (icao_address, kind) = match message {
-            Message {
-                kind: ADSBMessage {
-                    icao_address, kind, ..
-                },
-                ..
+        let icao_address= match message.kind {
+            ADSBMessage {
+                    icao_address, ..
             } => {
                 *self
                     .known_message_counts
                     .entry(message.downlink_format)
                     .or_insert(0) += 1;
-                (icao_address, kind)
-            }
-            _ => {
-                self.update_unknown_message_statistics(message, data);
+                icao_address
+            },
+            ModeSMessage {
+                icao_address, ..
+            } => {
+                *self
+                    .known_message_counts
+                    .entry(message.downlink_format)
+                    .or_insert(0) += 1;
+                icao_address
+            },
+            Unknown => {
+                self.update_unknown_message_statistics(&message, data);
                 return;
             }
         };
@@ -184,28 +191,50 @@ impl Tracker {
             .entry(icao_address)
             .or_insert_with(|| Aircraft::new(icao_address, time));
 
-        match kind {
-            AircraftIdentification { callsign, .. } => {
+        match message.kind {
+            ADSBMessage {
+                kind: ADSBMessageKind::AircraftIdentification { callsign, .. },
+                ..
+            } => {
                 aircraft.callsign = Some(callsign.trim().to_string());
-            }
-            AirbornePosition {
-                altitude,
-                cpr_frame,
+            },
+            ADSBMessage {
+                kind: ADSBMessageKind::AirbornePosition {
+                    altitude,
+                    cpr_frame
+                },
+                ..
             } => {
                 aircraft.altitude = Some(altitude);
                 aircraft.update_position(cpr_frame);
             }
-            AirborneVelocity {
-                heading,
-                ground_speed,
-                vertical_rate,
-                vertical_rate_source,
+            ADSBMessage {
+                kind: ADSBMessageKind::AirborneVelocity {
+                    heading,
+                    ground_speed,
+                    vertical_rate,
+                    vertical_rate_source,
+                },
+                ..
             } => {
                 aircraft.heading = Some(heading);
                 aircraft.ground_speed = Some(ground_speed);
                 aircraft.vertical_rate = Some(vertical_rate);
                 aircraft.vertical_rate_source = Some(vertical_rate_source);
             }
+            ModeSMessage {
+                kind: ModeSMessageKind::SurveillanceIdentity {
+                    squawk
+                },
+                ..
+            }  => {
+                aircraft.squawk = Some(squawk);
+            },
+            ModeSMessage {
+                kind: ModeSMessageKind::Unknown,
+                ..
+            } => {},
+            Unknown => {}
         }
         aircraft.last_seen = time;
 
@@ -268,15 +297,14 @@ impl Tracker {
 
     pub fn get_messages_per_second_real_time(&self) -> Option<f64> {
         match self.first_message_real_time {
-            Some(start) => {
-                match self.most_recent_message_real_time {
-                    Some(end) => {
-                        Some(1000.0 * (self.num_messages as f64) / (end.signed_duration_since(start).num_milliseconds() as f64))
-                    },
-                    None => None
-                }
-            }, 
-            None => None
+            Some(start) => match self.most_recent_message_real_time {
+                Some(end) => Some(
+                    1000.0 * (self.num_messages as f64)
+                        / (end.signed_duration_since(start).num_milliseconds() as f64),
+                ),
+                None => None,
+            },
+            None => None,
         }
     }
 }

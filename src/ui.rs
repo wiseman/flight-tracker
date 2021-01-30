@@ -88,7 +88,7 @@ fn draw_aircraft_table<B: Backend>(f: &mut Frame<B>, app: &App, rect: Rect) {
                 let fields = vec![
                     format!("{}", aircraft.icao_address),
                     aircraft.callsign.clone().unwrap_or_else(|| "".to_string()),
-                    "".to_string(),
+                    aircraft.squawk.map(|v| format!("{}", v)).unwrap_or_else(|| "".to_string()),
                     fmt_value(aircraft.altitude, 0),
                     fmt_value(aircraft.heading, 0),
                     fmt_value(aircraft.ground_speed, 0),
