@@ -32,6 +32,8 @@ struct Cli {
         long = "expire"
     )]
     expire: i64,
+    #[structopt(long)]
+    interactive: bool,
 }
 
 #[derive(StructOpt)]
@@ -69,51 +71,54 @@ fn main() -> Result<()> {
         Command::Tcp { host, port } => read_from_network(host, port, tracker),
         Command::Postgres { query } => read_from_postgres(tracker, query),
     };
-    // let writer = write_output(app, expire, show_stats);
+    if args.interactive {
+        let mut stdout = io::stdout()
+            .into_raw_mode()
+            .expect("Unable to switch stdout to raw mode");
+        write!(stdout, "{}", termion::clear::All).expect("Unable to clear terminal");
+        let backend = TermionBackend::new(stdout);
+        let mut terminal = Terminal::new(backend).expect("Unable to initialize terminal");
 
-    let mut stdout = io::stdout()
-        .into_raw_mode()
-        .expect("Unable to switch stdout to raw mode");
-    write!(stdout, "{}", termion::clear::All).expect("Unable to clear terminal");
-    let backend = TermionBackend::new(stdout);
-    let mut terminal = Terminal::new(backend).expect("Unable to initialize terminal");
+        let orig_hook = panic::take_hook();
+        std::panic::set_hook(Box::new(move |panic_info| {
+            orig_hook(panic_info);
+            println!("Aborting");
+            process::exit(1);
+        }));
 
-    let orig_hook = panic::take_hook();
-    std::panic::set_hook(Box::new(move |panic_info| {
-        orig_hook(panic_info);
-        println!("Aborting");
-        process::exit(1);
-    }));
-
-    let stdin = termion::async_stdin();
-    let mut keys = stdin.keys();
-    let mut screen = InteractiveScreen::Screen1;
-    loop {
-        terminal
-            .draw(|f| match screen {
-                InteractiveScreen::Screen1 => {
-                    ui::draw_screen_1(f, &app);
+        let stdin = termion::async_stdin();
+        let mut keys = stdin.keys();
+        let mut screen = InteractiveScreen::Screen1;
+        loop {
+            terminal
+                .draw(|f| match screen {
+                    InteractiveScreen::Screen1 => {
+                        ui::draw_screen_1(f, &app);
+                    }
+                    InteractiveScreen::Screen2 => {
+                        ui::draw_screen_2(f, &app);
+                    }
+                })
+                .expect("Unable to render");
+            if app.should_quit {
+                break;
+            }
+            thread::sleep(REFRESH_INTERVAL);
+            let key = keys.next();
+            if let Some(event) = key {
+                match event? {
+                    Key::Char('q') => {
+                        app.should_quit = true;
+                    }
+                    Key::Char('1') => screen = InteractiveScreen::Screen1,
+                    Key::Char('2') => screen = InteractiveScreen::Screen2,
+                    _ => {}
                 }
-                InteractiveScreen::Screen2 => {
-                    ui::draw_screen_2(f, &app);
-                }
-            })
-            .expect("Unable to render");
-        if app.should_quit {
-            break;
-        }
-        thread::sleep(REFRESH_INTERVAL);
-        let key = keys.next();
-        if let Some(event) = key {
-            match event? {
-                Key::Char('q') => {
-                    app.should_quit = true;
-                }
-                Key::Char('1') => screen = InteractiveScreen::Screen1,
-                Key::Char('2') => screen = InteractiveScreen::Screen2,
-                _ => {}
             }
         }
+    } else {
+        let writer = write_output(app, expire, show_stats);
+        _reader.join().unwrap().unwrap();
     }
     Ok(())
 }

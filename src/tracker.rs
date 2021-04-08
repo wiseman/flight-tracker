@@ -103,13 +103,12 @@ pub fn parse_avr(frame: &str) -> Result<Vec<u8>, std::num::ParseIntError> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_parse_avr() {
-        let mut v = Vec::new();
-        v.push(255);
-        // assert_eq!(parse_avr("*FF;"), Ok(v));
-        assert_eq!(parse_avr("*8DA46D4F99155818A8044075D32B;"), Ok(v));
-    }
+    // #[test]
+    // fn test_parse_avr() {
+    //     let mut v = vec![..];
+    //     // assert_eq!(parse_avr("*FF;"), Ok(v));
+    //     assert_eq!(parse_avr("*8DA46D4F99155818A8044075D32B;"), Ok(v));
+    // }
 }
 
 impl Tracker {
@@ -174,6 +173,10 @@ impl Tracker {
             ModeSMessage {
                 icao_address, ..
             } => {
+                // if !self.map.contains_key(&icao_address) {
+                //     println!("{}", icao_address);
+                //     println!("{:?}", message.kind);
+                // }
                 *self
                     .known_message_counts
                     .entry(message.downlink_format)
@@ -224,16 +227,13 @@ impl Tracker {
             }
             ModeSMessage {
                 kind: ModeSMessageKind::SurveillanceIdentity {
-                    squawk
+                    squawk,
+                    ..
                 },
                 ..
             }  => {
                 aircraft.squawk = Some(squawk);
             },
-            ModeSMessage {
-                kind: ModeSMessageKind::Unknown,
-                ..
-            } => {},
             Unknown => {}
         }
         aircraft.last_seen = time;
