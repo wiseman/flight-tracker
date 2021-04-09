@@ -1,12 +1,13 @@
+use adsb::ICAOAddress;
 use anyhow::Result;
-use chrono::{Duration, Utc};
-use flight_tracker::Tracker;
+use chrono::{DateTime, Duration, Utc};
+use flight_tracker::{icao, Tracker};
 use postgres::{Client, NoTls};
-use std::io::BufReader;
 use std::io::Write;
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+use std::{collections::HashMap, io::BufReader};
 use std::{io, panic, process};
 use structopt::StructOpt;
 use termion::event::Key;
@@ -27,7 +28,7 @@ struct Cli {
     #[structopt(
         name = "expire",
         help = "Number of seconds before removing stale entries",
-        default_value = "60",
+        default_value = "120",
         short = "e",
         long = "expire"
     )]
@@ -66,12 +67,12 @@ fn main() -> Result<()> {
     let tracker = Arc::new(Mutex::new(Tracker::new()));
     let _expire = Duration::seconds(args.expire);
     let mut app = App::new("Untitled Flight Tracker", tracker.clone());
-    let _reader = match args.cmd {
-        Command::Stdin => read_from_stdin(tracker),
-        Command::Tcp { host, port } => read_from_network(host, port, tracker),
-        Command::Postgres { query } => read_from_postgres(tracker, query),
-    };
     if args.interactive {
+        let _reader = match args.cmd {
+            Command::Stdin => read_from_stdin(tracker),
+            Command::Tcp { host, port } => read_from_network(host, port, tracker),
+            Command::Postgres { query } => read_from_postgres(tracker, query),
+        };
         let mut stdout = io::stdout()
             .into_raw_mode()
             .expect("Unable to switch stdout to raw mode");
@@ -117,8 +118,12 @@ fn main() -> Result<()> {
             }
         }
     } else {
-        let writer = write_output(app, expire, show_stats);
-        _reader.join().unwrap().unwrap();
+        match args.cmd {
+            Command::Postgres { query } => read_from_postgres2(tracker, query).unwrap(),
+            _ => {
+                panic!("No.");
+            }
+        };
     }
     Ok(())
 }
@@ -136,11 +141,6 @@ fn read_from_stdin(tracker: Arc<Mutex<Tracker>>) -> JoinHandle<Result<()>> {
     })
 }
 
-struct Ping {
-    timestamp: chrono::DateTime<Utc>,
-    data: Vec<u8>,
-}
-
 fn read_from_postgres(tracker: Arc<Mutex<Tracker>>, query: String) -> JoinHandle<Result<()>> {
     thread::spawn(move || {
         let mut client = Client::connect(
@@ -153,14 +153,71 @@ fn read_from_postgres(tracker: Arc<Mutex<Tracker>>, query: String) -> JoinHandle
             let result = trans.query_portal(&portal, 10000)?;
             let mut tracker = tracker.lock().unwrap();
             for row in result {
-                let ping = Ping {
-                    timestamp: row.get("timestamp"),
-                    data: row.get("data"),
-                };
-                let _ = tracker.update_with_binary(&ping.data, ping.timestamp);
+                let time: DateTime<Utc> = row.get("timestamp");
+                let data: Vec<u8> = row.get("data");
+                let _ = tracker.update_with_binary(&data, time);
             }
         }
     })
+}
+
+fn read_from_postgres2(tracker: Arc<Mutex<Tracker>>, query: String) -> Result<()> {
+    let mut client = Client::connect(
+        "host=storage.local port=54322 user=orbital password=orbital",
+        NoTls,
+    )?;
+    let mut trans = client.transaction().unwrap();
+    let portal = trans.bind(query.as_str(), &[])?;
+    let mut last_printed: HashMap<ICAOAddress, DateTime<Utc>> = HashMap::new();
+    let min_print_duration = chrono::Duration::seconds(10);
+    let mut num_rows = 1;
+    while num_rows > 0 {
+        println!(".");
+        let result = trans.query_portal(&portal, 10000)?;
+        let mut tracker = tracker.lock().unwrap();
+        num_rows = 0;
+        for row in result {
+            num_rows += 1;
+            let time: DateTime<Utc> = row.get("timestamp");
+            let data: Vec<u8> = row.get("data");
+            let (message, _) = adsb::parse_binary(&data)?;
+            let i = icao(&message);
+            tracker.update_with_message(message, &data, time);
+            if tracker.get_num_messages() % 10000 == 0 {
+                if let Some(msg_rate) = tracker.get_messages_per_second_real_time() {
+                    // eprintln!("{:#?}", tracker.pos_update_times);
+                    eprintln!(
+                        "# {} messages total, {} messages/sec",
+                        tracker.get_num_messages(),
+                        msg_rate
+                    )
+                }
+            }
+            // println!("{:?}", tracker.map);
+            // println!("{:?}", last_printed);
+            if let Some(icao) = i {
+                let print = match last_printed.get(&icao) {
+                    Some(ts) => time.signed_duration_since(*ts) > min_print_duration,
+                    None => true,
+                };
+                if print {
+                    let ac = tracker.map.get(&icao).unwrap();
+                    if let (Some(lat), Some(lon)) = (ac.latitude, ac.longitude) {
+                        println!(
+                            "{},{},{},{},{}",
+                            time,
+                            icao,
+                            lat,
+                            lon,
+                            ac.altitude.unwrap()
+                        );
+                        last_printed.insert(icao, time);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn read_from_network(

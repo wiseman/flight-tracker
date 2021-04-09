@@ -1,5 +1,5 @@
 use adsb::*;
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use std::collections::HashMap;
 use MessageKind::*;
 
@@ -27,13 +27,14 @@ pub struct Aircraft {
     /// Source for vertical rate information
     pub vertical_rate_source: Option<VerticalRateSource>,
     /// Timestamp for last received message
-    pub last_seen: chrono::DateTime<Utc>,
-    last_cpr_even: Option<CPRFrame>,
-    last_cpr_odd: Option<CPRFrame>,
+    pub last_seen: DateTime<Utc>,
+    last_cpr_even: Option<(CPRFrame, DateTime<Utc>)>,
+    last_cpr_odd: Option<(CPRFrame, DateTime<Utc>)>,
+    last_pos_seen: Option<DateTime<Utc>>
 }
 
 impl Aircraft {
-    fn new(icao_address: ICAOAddress, time: chrono::DateTime<Utc>) -> Self {
+    fn new(icao_address: ICAOAddress, time: DateTime<Utc>) -> Self {
         Aircraft {
             icao_address,
             callsign: None,
@@ -48,32 +49,52 @@ impl Aircraft {
             last_seen: time,
             last_cpr_even: None,
             last_cpr_odd: None,
+            last_pos_seen: None,
         }
     }
 
-    fn update_position(&mut self, cpr_frame: CPRFrame) {
+    fn update_position(&mut self, cpr_frame: CPRFrame, when: DateTime<Utc>) -> Option<Duration> {
         let last_parity = cpr_frame.parity.clone();
         match last_parity {
             Parity::Even => {
-                self.last_cpr_even = Some(cpr_frame);
+                self.last_cpr_even = Some((cpr_frame, when));
             }
             Parity::Odd => {
-                self.last_cpr_odd = Some(cpr_frame);
+                self.last_cpr_odd = Some((cpr_frame, when));
             }
         }
-        if let (Some(even), Some(odd)) = (&self.last_cpr_even, &self.last_cpr_odd) {
-            let position = match last_parity {
-                Parity::Even => cpr::get_position((&odd, &even)),
-                Parity::Odd => cpr::get_position((&even, &odd)),
-            };
-            if let Some(Position {
-                latitude,
-                longitude,
-            }) = position
-            {
-                self.latitude = Some(latitude);
-                self.longitude = Some(longitude);
+
+        if let (Some((even, even_time)), Some((odd, odd_time))) =
+            (&self.last_cpr_even, &self.last_cpr_odd)
+        {
+            let delta = even_time.signed_duration_since(*odd_time);
+            if delta.num_seconds().abs() <= 30 {
+                let position = match last_parity {
+                    Parity::Even => cpr::get_position((&odd, &even)),
+                    Parity::Odd => cpr::get_position((&even, &odd)),
+                };
+                if let Some(Position {
+                    latitude,
+                    longitude,
+                }) = position
+                {
+                    self.latitude = Some(latitude);
+                    self.longitude = Some(longitude);
+                    let last_pos_seen = self.last_pos_seen;
+                    self.last_pos_seen = Some(when);
+                    if let Some(last_pos_seen) = last_pos_seen {
+                        Some(when.signed_duration_since(last_pos_seen))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
             }
+        } else {
+            None
         }
     }
 }
@@ -81,15 +102,16 @@ impl Aircraft {
 /// Stores the set of currently tracked aircraft
 #[derive(Default)]
 pub struct Tracker {
-    map: HashMap<ICAOAddress, Aircraft>,
+    pub map: HashMap<ICAOAddress, Aircraft>,
     num_messages: u64,
     num_unknown_messages: u64,
     unknown_message_counts: HashMap<u8, u64>,
     unknown_message_data: HashMap<u8, Vec<u8>>,
     known_message_counts: HashMap<u8, u64>,
-    most_recent_message_time: Option<chrono::DateTime<Utc>>,
-    first_message_real_time: Option<chrono::DateTime<Utc>>,
-    most_recent_message_real_time: Option<chrono::DateTime<Utc>>,
+    most_recent_message_time: Option<DateTime<Utc>>,
+    first_message_real_time: Option<DateTime<Utc>>,
+    most_recent_message_real_time: Option<DateTime<Utc>>,
+    pub pos_update_times: HashMap<i64, u32>,
 }
 
 pub fn parse_avr(frame: &str) -> Result<Vec<u8>, std::num::ParseIntError> {
@@ -103,12 +125,11 @@ pub fn parse_avr(frame: &str) -> Result<Vec<u8>, std::num::ParseIntError> {
 mod tests {
     use super::*;
 
-    // #[test]
-    // fn test_parse_avr() {
-    //     let mut v = vec![..];
-    //     // assert_eq!(parse_avr("*FF;"), Ok(v));
-    //     assert_eq!(parse_avr("*8DA46D4F99155818A8044075D32B;"), Ok(v));
-    // }
+    #[test]
+    fn test_parse_avr() {
+        let v = vec![141, 164, 109, 79, 153, 21, 88, 24, 168, 4, 64, 117, 211, 43];
+        assert_eq!(parse_avr("*8DA46D4F99155818A8044075D32B;"), Ok(v));
+    }
 }
 
 impl Tracker {
@@ -121,7 +142,7 @@ impl Tracker {
     pub fn update_with_avr(
         &mut self,
         frame: &str,
-        time: chrono::DateTime<Utc>,
+        time: DateTime<Utc>,
     ) -> Result<(), adsb::ParserError> {
         let (message, _) = adsb::parse_avr(frame)?;
         // println!("{:?}", message);
@@ -142,7 +163,7 @@ impl Tracker {
     pub fn update_with_binary(
         &mut self,
         frame: &[u8],
-        time: chrono::DateTime<Utc>,
+        time: DateTime<Utc>,
     ) -> Result<(), adsb::ParserError> {
         let (message, _) = adsb::parse_binary(frame)?;
         self.update_with_message(message, frame, time);
@@ -156,23 +177,24 @@ impl Tracker {
         self.num_unknown_messages += 1;
     }
 
-    fn update_with_message(&mut self, message: Message, data: &[u8], time: chrono::DateTime<Utc>) {
+    pub fn update_with_message(
+        &mut self,
+        message: Message,
+        data: &[u8],
+        time: DateTime<Utc>,
+    ) {
         // println!("{:>10} {:?} {:02X?}", self.get_num_messages(), time, data);
         let now = Utc::now();
         self.num_messages += 1;
-        let icao_address= match message.kind {
-            ADSBMessage {
-                    icao_address, ..
-            } => {
+        let icao_address = match message.kind {
+            ADSBMessage { icao_address, .. } => {
                 *self
                     .known_message_counts
                     .entry(message.downlink_format)
                     .or_insert(0) += 1;
                 icao_address
-            },
-            ModeSMessage {
-                icao_address, ..
-            } => {
+            }
+            ModeSMessage { icao_address, .. } => {
                 // if !self.map.contains_key(&icao_address) {
                 //     println!("{}", icao_address);
                 //     println!("{:?}", message.kind);
@@ -182,7 +204,7 @@ impl Tracker {
                     .entry(message.downlink_format)
                     .or_insert(0) += 1;
                 icao_address
-            },
+            }
             Unknown => {
                 self.update_unknown_message_statistics(&message, data);
                 return;
@@ -200,24 +222,31 @@ impl Tracker {
                 ..
             } => {
                 aircraft.callsign = Some(callsign.trim().to_string());
-            },
+            }
             ADSBMessage {
-                kind: ADSBMessageKind::AirbornePosition {
-                    altitude,
-                    cpr_frame
-                },
+                kind:
+                    ADSBMessageKind::AirbornePosition {
+                        altitude,
+                        cpr_frame,
+                    },
                 ..
             } => {
                 aircraft.altitude = Some(altitude);
-                aircraft.update_position(cpr_frame);
+                let update_duration = aircraft.update_position(cpr_frame, time);
+                if let Some(dur) = update_duration {
+                    let ms = 100 * (dur.num_milliseconds() / 100);
+                    let count = self.pos_update_times.entry(ms).or_insert(0);
+                    *count += 1;
+                }
             }
             ADSBMessage {
-                kind: ADSBMessageKind::AirborneVelocity {
-                    heading,
-                    ground_speed,
-                    vertical_rate,
-                    vertical_rate_source,
-                },
+                kind:
+                    ADSBMessageKind::AirborneVelocity {
+                        heading,
+                        ground_speed,
+                        vertical_rate,
+                        vertical_rate_source,
+                    },
                 ..
             } => {
                 aircraft.heading = Some(heading);
@@ -226,14 +255,11 @@ impl Tracker {
                 aircraft.vertical_rate_source = Some(vertical_rate_source);
             }
             ModeSMessage {
-                kind: ModeSMessageKind::SurveillanceIdentity {
-                    squawk,
-                    ..
-                },
+                kind: ModeSMessageKind::SurveillanceIdentity { squawk, .. },
                 ..
-            }  => {
+            } => {
                 aircraft.squawk = Some(squawk);
-            },
+            }
             Unknown => {}
         }
         aircraft.last_seen = time;
@@ -258,7 +284,7 @@ impl Tracker {
     pub fn get_current_aircraft(
         &self,
         interval: &Duration,
-        now: chrono::DateTime<Utc>,
+        now: DateTime<Utc>,
     ) -> Vec<&Aircraft> {
         self.map
             .values()
@@ -291,7 +317,7 @@ impl Tracker {
         &self.known_message_counts
     }
 
-    pub fn get_most_recent_message_time(&self) -> Option<chrono::DateTime<Utc>> {
+    pub fn get_most_recent_message_time(&self) -> Option<DateTime<Utc>> {
         self.most_recent_message_time
     }
 
@@ -306,5 +332,13 @@ impl Tracker {
             },
             None => None,
         }
+    }
+}
+
+pub fn icao(message: &Message) -> Option<ICAOAddress> {
+    match message.kind {
+        ADSBMessage { icao_address, .. } => Some(icao_address),
+        ModeSMessage { icao_address, .. } => Some(icao_address),
+        Unknown => None,
     }
 }
